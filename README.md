@@ -1,7 +1,5 @@
 # FC Letter Decoding
 
-## Overview
-
 The main objectives of this project are:
 
 - Perform letter decoding using population activity
