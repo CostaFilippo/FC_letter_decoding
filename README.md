@@ -95,16 +95,11 @@ The `Data/` directory contains the pre-processed experimental dataset: 
 
 ## Analysis Pipeline
 
-### Stage 0: Preprocessing
 
 #### `0a_group_and_align.ipynb`
 
 - Aligns sessions temporally
 - Standardizes trial structure
-
----
-
-### Stage 1: Unit Characterization
 
 #### `1a_localization.ipynb`
 
@@ -113,10 +108,6 @@ The `Data/` directory contains the pre-processed experimental dataset: 
 #### `1b_units_and_behavior.ipynb`
 
 - Analysis of behavioral variables
-
----
-
-### Stage 2: Decoding Analysis
 
 #### `2a_letter_decoding.ipynb`
 
@@ -131,10 +122,6 @@ The `Data/` directory contains the pre-processed experimental dataset: 
 #### `2c_RT_INOUT.ipynb`
 
 - Analyzes the relation between response time and letter decoding accuracy
-
----
-
-### Stage 3: Extended Analyses
 
 #### `3a_heldout_letter_decoding.ipynb`
 
@@ -156,10 +143,6 @@ The `Data/` directory contains the pre-processed experimental dataset: 
 
 - Compares decoding across trial types
 
----
-
-### Tables and Statistics
-
 #### `glm.R`
 
 - Fits a mixed-effect generalized linear model for the reaction time
@@ -178,6 +161,7 @@ The analysis produces:
 Results are visualized in `Figures/` and archived in `Results.zip`.
 Typical runs complete in minutes for notebooks 0a, 1a, 1b, 2b, 2c, 3b and for glm.R.
 Notebooks 2a, 3a, 3c, 3d and 3e require multiple decoding runs. Each decoding run completes in around 2 minutes when using parallel processing (tested with 6 cores).
+
 ---
 
 ## Figures
