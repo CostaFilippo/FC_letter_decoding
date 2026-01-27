@@ -14,8 +14,6 @@ The main objectives of this project are:
 FC_letter_decoding/
 │
 ├── Code/               
-│   ├── 0a_group_and_align.ipynb
-│   ├── 0b_extract_spikes.ipynb
 │   ├── 1a_localization.ipynb
 │   ├── 1b_units_and_behavior.ipynb
 │   ├── 2a_letter_decoding.ipynb
