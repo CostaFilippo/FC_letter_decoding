@@ -14,8 +14,6 @@ The main objectives of this project are:
 FC_letter_decoding/
 │
 ├── Code/               
-│   ├── 0a_group_and_align.ipynb
-│   ├── 0b_extract_spikes.ipynb
 │   ├── 1a_localization.ipynb
 │   ├── 1b_units_and_behavior.ipynb
 │   ├── 2a_letter_decoding.ipynb
@@ -93,12 +91,6 @@ The `Data/` directory contains the pre-processed experimental dataset: 
 
 ## Analysis Pipeline
 
-
-#### `0a_group_and_align.ipynb`
-
-- Aligns sessions temporally
-- Standardizes trial structure
-
 #### `1a_localization.ipynb`
 
 - Determines anatomical locations of units
@@ -158,7 +150,7 @@ The analysis produces:
 
 Results are visualized in `Figures/` and archived in `Results.zip`.
 
-Typical runs complete in minutes for notebooks 0a, 1a, 1b, 2b, 2c, 3b and for glm.R.
+Typical runs complete in minutes for notebooks 1a, 1b, 2b, 2c, 3b and for glm.R.
 
 Notebooks 2a, 3a, 3c, 3d and 3e require multiple decoding runs. Each decoding run completes in around 2 minutes when using parallel processing (tested with 6 cores).
 
