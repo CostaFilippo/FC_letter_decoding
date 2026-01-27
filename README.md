@@ -93,12 +93,6 @@ The `Data/` directory contains the pre-processed experimental dataset: 
 
 ## Analysis Pipeline
 
-
-#### `0a_group_and_align.ipynb`
-
-- Aligns sessions temporally
-- Standardizes trial structure
-
 #### `1a_localization.ipynb`
 
 - Determines anatomical locations of units
