@@ -150,7 +150,7 @@ The analysis produces:
 
 Results are visualized in `Figures/` and archived in `Results.zip`.
 
-Typical runs complete in minutes for notebooks 0a, 1a, 1b, 2b, 2c, 3b and for glm.R.
+Typical runs complete in minutes for notebooks 1a, 1b, 2b, 2c, 3b and for glm.R.
 
 Notebooks 2a, 3a, 3c, 3d and 3e require multiple decoding runs. Each decoding run completes in around 2 minutes when using parallel processing (tested with 6 cores).
 
