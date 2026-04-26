@@ -1,10 +1,23 @@
 # ============================================================
-# Mixed-effects model in R (lme4) matching your Python workflow
-# - Reads df from CSV
-# - Factors: inout, size, probe, subject
-# - Sets probe baseline to "G" (if present)
-# - Fits: rt ~ predicted + inout + size + probe + (1|subject)
-# - Outputs a clean fixed-effects table: Coef, CI, t, p, p-FDR
+# Mixed-effects model in R (lme4) matching the updated Python workflow
+# (Table1_phonological.ipynb)
+#
+# Model:
+#   rt ~ predicted_z
+#      + phon_sim_z
+#      + probe_phon_sim_z
+#      + trial_type        (IN vs OUT; OUT = reference)
+#      + size              (4/6/8;     4   = reference)
+#      + probe             (letters;   G   = reference)
+#      + (1 | subject)
+#
+# Continuous predictors are mean-centred and then z-scored
+# within each subject (matching the Python `zscore_by_subject`).
+# Categorical reference levels match the Python `C(...)` defaults.
+#
+# Outputs a clean fixed-effects table: Coef, CI, t, p, with FDR
+# (Benjamini-Hochberg) applied separately to the probe and size
+# families.
 # ============================================================
 
 # ---- Install (run once) ----
@@ -17,16 +30,28 @@ library(readr)
 
 # ---- Read CSV ----
 # Put your df.csv in the working directory, or provide a full path.
-df <- read_csv("E:\\Compositional_encoding\\Code\\table_df.csv")
+df <- read_csv("..\\Results\\table_df.csv")
 
-# ---- Make sure categorical variables are factors ----
-df$inout   <- factor(df$inout)     # e.g., 51/52
-df$size    <- factor(df$size)      # e.g., 4/6/8
-df$probe   <- factor(df$probe)     # letters
-df$subject <- factor(df$subject)   # subject IDs
+# ============================================================
+# 1. Categorical variables and reference levels
+# ============================================================
 
-df$inout <- factor(df$inout, levels = rev(levels(df$inout)))
-df$size  <- factor(df$size,  levels = rev(levels(df$size)))
+# trial_type: recoded from inout (51 = IN, 52 = OUT) if needed.
+# If the CSV already has a 'trial_type' column with "IN"/"OUT",
+# the recoding block is skipped.
+if (!"trial_type" %in% names(df)) {
+  if ("inout" %in% names(df)) {
+    df$trial_type <- ifelse(df$inout == 51, "IN",
+                     ifelse(df$inout == 52, "OUT", NA_character_))
+  } else {
+    stop("Neither 'trial_type' nor 'inout' found in the data.")
+  }
+}
+
+df$trial_type <- factor(df$trial_type, levels = c("OUT", "IN"))  # OUT = reference
+df$size       <- factor(df$size,       levels = c(4, 6, 8))      # 4   = reference
+df$probe      <- factor(df$probe)
+df$subject    <- factor(df$subject)
 
 # ---- Set 'G' as the reference (baseline) level for probe ----
 df$probe <- droplevels(df$probe)
@@ -36,67 +61,68 @@ if ("G" %in% levels(df$probe)) {
   warning("'G' is not present in probe categories; default reference will be used.")
 }
 
-# ---- Fit mixed model (random intercept for subject), ML like Python reml=False ----
+# ============================================================
+# 2. Centre and z-score continuous predictors WITHIN subject
+#    (matches Python: subtract grand mean, then z-score by subject)
+# ============================================================
+
+# Helper: grand-mean centre, then z-score within subject
+zscore_by_subject <- function(x, subj) {
+  xc <- x - mean(x, na.rm = TRUE)            # grand-mean centring
+  ave(xc, subj, FUN = function(v) {          # within-subject z-scoring
+    s <- sd(v, na.rm = TRUE)
+    if (is.na(s) || s == 0) rep(0, length(v)) else (v - mean(v, na.rm = TRUE)) / s
+  })
+}
+
+df$predicted_z      <- zscore_by_subject(df$predicted,      df$subject)
+df$phon_sim_z       <- zscore_by_subject(df$phon_sim,       df$subject)
+df$probe_phon_sim_z <- zscore_by_subject(df$probe_phon_sim, df$subject)
+
+# ============================================================
+# 3. Fit mixed model (random intercept for subject), ML
+#    (REML = FALSE matches Python statsmodels reml=False)
+# ============================================================
+
 m <- lmer(
-  rt ~ predicted + inout + size + probe + (1 | subject),
-  data = df,
-  REML = FALSE
+  rt ~ predicted_z
+     + phon_sim_z
+     + probe_phon_sim_z
+     + trial_type
+     + size
+     + probe
+     + (1 | subject),
+  data    = df,
+  REML    = FALSE
 )
 
 # Optional: print model summary to console
 print(summary(m))
 
 # ============================================================
-# Build clean fixed-effects table: Coef, CI [low, high], t, p
-# (lmerTest gives t + p-values; Python MixedLM reports z by default)
+# 4. Build clean fixed-effects table: Coef, CI [low, high], t, p
+#    (lmerTest gives t + p-values; Python MixedLM reports z by default)
 # ============================================================
 
-s <- summary(m)
+s     <- summary(m)
 coefs <- s$coefficients
 # columns typically: Estimate, Std. Error, df, t value, Pr(>|t|)
 
-# Wald CIs for fixed effects (like a quick CI from standard errors)
+# Wald CIs for fixed effects (quick CI from standard errors)
 ci <- confint(m, parm = "beta_", method = "Wald")  # only fixed effects
 
 results_table <- data.frame(
-  term = rownames(coefs),
+  term        = rownames(coefs),
   Coefficient = round(coefs[, "Estimate"], 3),
-  CI = sprintf("[%.3f, %.3f]", ci[, 1], ci[, 2]),
-  t = round(coefs[, "t value"], 3),
-  p_value = format.pval(coefs[, "Pr(>|t|)"], digits = 2, eps = 1e-99),
+  CI          = sprintf("[%.3f, %.3f]", ci[, 1], ci[, 2]),
+  t           = round(coefs[, "t value"], 3),
+  p_raw       = coefs[, "Pr(>|t|)"],
   stringsAsFactors = FALSE
 )
 
 # ============================================================
-# FDR (BH) correction separately for probe and size terms
+# 5. FDR (BH) correction separately for probe and size families
 # ============================================================
-
-probe_mask <- grepl("^probe", results_table$term)
-size_mask  <- grepl("^size",  results_table$term)
-
-results_table$p_FDR <- ""
-
-results_table$p_FDR[probe_mask] <- format.pval(
-  p.adjust(coefs[probe_mask, "Pr(>|t|)"], method = "BH"),
-  digits = 2, eps = 1e-99
-)
-
-results_table$p_FDR[size_mask] <- format.pval(
-  p.adjust(coefs[size_mask, "Pr(>|t|)"], method = "BH"),
-  digits = 2, eps = 1e-99
-)
-
-# ---- View results ----
-print(results_table, row.names = FALSE)
-
-results_table <- data.frame(
-  term = rownames(coefs),
-  Coefficient = round(coefs[, "Estimate"], 3),
-  CI = sprintf("[%.3f, %.3f]", ci[, 1], ci[, 2]),
-  t = round(coefs[, "t value"], 3),
-  p_raw = coefs[, "Pr(>|t|)"],
-  stringsAsFactors = FALSE
-)
 
 probe_mask <- grepl("^probe", results_table$term)
 size_mask  <- grepl("^size",  results_table$term)
@@ -111,6 +137,7 @@ results_table$p_FDR[size_mask] <- p.adjust(
   results_table$p_raw[size_mask], method = "BH"
 )
 
+# Display column: FDR-corrected p where available, raw p otherwise
 results_table$p_value <- ifelse(
   is.na(results_table$p_FDR),
   results_table$p_raw,
@@ -125,6 +152,48 @@ results_table$p_value <- format.pval(
 results_table$p_raw <- NULL
 results_table$p_FDR <- NULL
 
+# ============================================================
+# 6. Rename terms to human-readable labels and reorder
+#    (matches the RENAME / PRIORITY blocks in the notebook)
+# ============================================================
+
+RENAME <- c(
+  "(Intercept)"        = "Intercept",
+  "predicted_z"        = "Decoding accuracy",
+  "phon_sim_z"         = "Phonological similarity (string)",
+  "probe_phon_sim_z"   = "Phonological similarity (probe-string)",
+  "trial_typeIN"       = "IN vs. OUT",
+  "size6"              = "6 vs. 4",
+  "size8"              = "8 vs. 4"
+)
+
+clean_term <- function(t) {
+  if (t %in% names(RENAME)) return(RENAME[[t]])
+  # probeX  "X vs. G"  (G is the reference)
+  if (grepl("^probe", t)) return(paste0(sub("^probe", "", t), " vs. G"))
+  t
+}
+
+results_table$term <- vapply(results_table$term, clean_term, character(1))
+
+# Reorder: key predictors first, covariates after
+PRIORITY <- c(
+  "Intercept",
+  "Decoding accuracy",
+  "Phonological similarity (string)",
+  "Phonological similarity (probe-string)",
+  "IN vs. OUT"
+)
+ord <- c(
+  match(PRIORITY, results_table$term, nomatch = 0),
+  setdiff(seq_len(nrow(results_table)),
+          match(PRIORITY, results_table$term, nomatch = 0))
+)
+ord <- ord[ord > 0]
+results_table <- results_table[ord, ]
+
+# ---- View results ----
+print(results_table, row.names = FALSE)
 
 # ---- Save results to CSV (optional) ----
 write.csv(results_table, "fixed_effects_results_table.csv", row.names = FALSE)

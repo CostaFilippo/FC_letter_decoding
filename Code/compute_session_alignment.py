@@ -709,3 +709,412 @@ def compute_session_alignment_CONTRAST_2BIAS(data, condition_vars, pars, t1, t2)
     }
 
     return D_align, D_cond_avg_proj_align, align_stats
+
+import numpy as np
+
+def compute_session_alignment_CONTRAST_2BIAS_SUBSELECT(data, condition_vars, pars, t1, t2):
+    """
+    Per-session alignment using a single condition-contrast axis.
+    No global vector: each session gets its own U_session.
+
+    Adds support for using a FIXED TOTAL number of neurons across all sessions by
+    subselecting units per session before computing session axes and projections.
+
+    Expected pars["alignment"] keys (new):
+      - n_units_total (int): total number of neurons to use across all sessions (required for this behavior)
+      - unit_selection (str): "random" (default) or "variance"
+      - seed (int): RNG seed (default 0)
+
+    Notes:
+      - Neurons are allocated across sessions proportional to available units, then rounded to exactly sum to n_units_total.
+      - If a session has fewer available units than its allocation, it uses all available units.
+      - Selection is applied consistently to both the raw response and condition means.
+    """
+    assert isinstance(data, list), "data must be a list of session dictionaries"
+    assert isinstance(condition_vars, list), "condition_vars must be a list"
+
+    alignment_pars  = pars.get("alignment", {})
+    align_proj_vars = pars.get("align_proj", {}).get("condition_vars", condition_vars)
+
+    # ---------------- NEW: total-unit control ----------------
+    n_units_total = alignment_pars.get("n_units_total", None)
+    if n_units_total is None:
+        raise ValueError("For fixed total neurons, set pars['alignment']['n_units_total'] (int).")
+
+    if not isinstance(n_units_total, (int, np.integer)) or n_units_total <= 0:
+        raise ValueError("pars['alignment']['n_units_total'] must be a positive integer.")
+
+    unit_selection = alignment_pars.get("unit_selection", "random")  # "random" | "variance"
+    #seed = alignment_pars.get("seed", 0)
+    rng = np.random.default_rng()
+
+    def _pick_units(resp, method, k, rng):
+        """
+        resp: (n_units, n_time, n_trials)
+        returns: unit indices length k (or all units if k >= n_units)
+        """
+        n_units = resp.shape[0]
+        if k is None or k >= n_units:
+            return np.arange(n_units)
+
+        if method == "random":
+            return rng.choice(n_units, size=k, replace=False)
+
+        if method == "variance":
+            v = np.var(resp.reshape(n_units, -1), axis=1)
+            return np.argsort(v)[::-1][:k]
+
+        raise ValueError(f"Unknown unit_selection: {method}")
+
+    # Allocate unit counts per session (proportional to available units), then fix rounding to exact total.
+    num_sessions = len(data)
+    avail = np.array([d["response"].shape[0] for d in data], dtype=int)
+    total_avail = int(avail.sum())
+    if n_units_total > total_avail:
+        raise ValueError(
+            f"Requested n_units_total={n_units_total}, but only {total_avail} neurons available across all sessions."
+        )
+
+    frac = avail / total_avail
+    k_list = np.floor(frac * n_units_total).astype(int)
+
+    # Ensure each session with avail>0 can potentially contribute; rounding fix to hit exact total.
+    # Add units to sessions with remaining capacity, preferring larger fractional remainders.
+    remainders = (frac * n_units_total) - k_list
+
+    def _can_add(j):
+        return k_list[j] < avail[j]
+
+    while int(k_list.sum()) < n_units_total:
+        candidates = np.where([_can_add(j) for j in range(num_sessions)])[0]
+        if candidates.size == 0:
+            break
+        j = candidates[np.argmax(remainders[candidates])]
+        k_list[j] += 1
+        remainders[j] = 0.0  # avoid repeatedly picking same due to stale remainder
+
+    # If we overshot for any reason, remove units from sessions with k>0
+    while int(k_list.sum()) > n_units_total:
+        candidates = np.where(k_list > 0)[0]
+        j = candidates[np.argmax(k_list[candidates])]
+        k_list[j] -= 1
+
+    # Subselect units per session and make a local working copy of data
+    data_work = []
+    unit_indices_by_session = []
+    for i_session in range(num_sessions):
+        resp_full = data[i_session]["response"]  # (n_units, n_time, n_trials)
+        k = int(k_list[i_session])
+
+        unit_idx = _pick_units(resp_full, unit_selection, k, rng)
+        unit_indices_by_session.append(unit_idx)
+
+        dcopy = dict(data[i_session])  # shallow copy
+        dcopy["response"] = resp_full[unit_idx, :, :]
+        data_work.append(dcopy)
+
+    # ---------------------------------------------------------
+
+    D_align = [None] * num_sessions
+    have_any_axis = False
+
+    # ---------- 1) Compute per-session condition means ----------
+    session_cond_means = []
+    for i_session in range(num_sessions):
+        D_cond = sort_trials_by_condition(data_work[i_session], condition_vars)
+        if len(D_cond) == 0:
+            raise ValueError(f"Session {i_session} has no conditions after sorting.")
+
+        # (n_units_sub, n_time, n_cond) where each slice is trial-mean for that condition
+        means_this_session = np.stack(
+            [np.mean(cdict["response"], axis=2) for cdict in D_cond],
+            axis=2
+        )
+        session_cond_means.append(means_this_session)
+
+    # Basic consistency checks + get n_conditions
+    n_conditions = session_cond_means[0].shape[2]
+    n_time0 = session_cond_means[0].shape[1]
+    for i, ms in enumerate(session_cond_means):
+        if ms.shape[1] != n_time0 or ms.shape[2] != n_conditions:
+            raise ValueError(f"Session {i} has different n_time/n_cond; cannot proceed.")
+
+    # Choose contrast indices
+    if "cond_contrast" in alignment_pars:
+        a_idx, b_idx = alignment_pars["cond_contrast"]
+    else:
+        if n_conditions >= 2:
+            a_idx, b_idx = (0, 1)
+        else:
+            raise ValueError("Need at least 2 conditions to form a contrast axis.")
+
+    # ---------- 2) Align each session with its own axis ----------
+    for i_session in range(num_sessions):
+        sess_means = session_cond_means[i_session]  # (n_units_sub, n_time, n_cond)
+        n_units, num_times, num_trials = data_work[i_session]["response"].shape
+
+        # Uniform time weighting: mean over time of (A − B)
+        local_diff = sess_means[:, t1:t2, a_idx] - sess_means[:, t1:t2, b_idx]  # (n_units_sub, t_window)
+        local_ref  = np.mean(local_diff, axis=1)                                # (n_units_sub,)
+
+        # Build per-session axis
+        norm_ref = np.linalg.norm(local_ref)
+        if norm_ref > 0:
+            U_session = local_ref / norm_ref
+            have_any_axis = True
+            # sign consistency so mean(A − B) > 0
+            if float(np.dot(U_session, local_ref)) < 0:
+                U_session = -U_session
+        else:
+            U_session = np.zeros(n_units, dtype=float)
+
+        U_session = U_session[:, None]  # (n_units_sub, 1)
+
+        # Project raw single trials (NO centering)
+        resp_2d    = data_work[i_session]["response"].reshape(n_units, -1)  # (n_units_sub, T*trials)
+        aligned_2d = U_session.T @ resp_2d                                  # (1, T*trials)
+        aligned    = aligned_2d.reshape(1, num_times, num_trials)           # (1, T, trials)
+
+        # -------- Bias so that A > 0 and B < 0 on average --------
+        proj_A_time = float(np.mean(U_session.T @ sess_means[:, t1:t2, a_idx]))  # scalar
+        proj_B_time = float(np.mean(U_session.T @ sess_means[:, t1:t2, b_idx]))  # scalar
+
+        if np.isfinite(proj_A_time) and np.isfinite(proj_B_time):
+            bias = -0.5 * (proj_A_time + proj_B_time)
+        else:
+            bias = 0.0
+
+        aligned = aligned + bias
+
+        # Package
+        D_align[i_session] = dict(data_work[i_session])  # shallow copy of working session dict
+        D_align[i_session]["response"] = aligned
+        D_align[i_session]["U"] = U_session
+        D_align[i_session]["bias"] = float(bias)
+        D_align[i_session]["X_mu"] = np.zeros(n_units, dtype=float)  # kept for API compatibility
+
+        # NEW: keep which original units were used (indices into the original session's units)
+        D_align[i_session]["unit_idx"] = unit_indices_by_session[i_session]
+
+    # ---------- 3) Trial-averaged aligned data ----------
+    D_cond_avg_proj_list = []
+    for i_session in range(num_sessions):
+        D_cond_align = sort_trials_by_condition(D_align[i_session], align_proj_vars)
+        means_for_session = np.stack(
+            [np.mean(cdict["response"], axis=2) for cdict in D_cond_align],
+            axis=2
+        )  # (1, n_time, n_cond)
+        D_cond_avg_proj_list.append(means_for_session)
+
+    D_cond_avg_proj_align = np.stack(D_cond_avg_proj_list, axis=3)  # (1, n_time, n_cond, n_sessions)
+
+    align_stats = {
+        "cond_axis_present": bool(have_any_axis),
+        "cond_contrast": (a_idx, b_idx),
+        "time_weighting": "uniform",
+
+        "n_units_total_requested": int(n_units_total),
+        "n_units_total_used": int(sum([len(ix) for ix in unit_indices_by_session])),
+        "n_units_by_session": [int(len(ix)) for ix in unit_indices_by_session],
+        "unit_selection": unit_selection,
+        #"seed": int(seed),
+    }
+
+    return D_align, D_cond_avg_proj_align, align_stats
+
+
+import numpy as np
+
+
+def compute_session_alignment_CONTRAST_2BIAS_SUBSELECT_BYIDX(
+    data, condition_vars, pars, t1, t2
+):
+    """
+    Per-session alignment using a single condition-contrast axis.
+
+    Removes neurons based on user-provided indices/masks BEFORE alignment.
+
+    Expected:
+      pars["alignment"]["exclude_units"] :
+        - list of int arrays/lists (indices to drop), OR
+        - list of boolean masks (True = drop)
+
+        Length must equal number of sessions.
+
+    Output:
+      D_align[i]["unit_idx"] = indices of KEPT units (wrt original data)
+    """
+
+    assert isinstance(data, list), "data must be a list of session dictionaries"
+    assert isinstance(condition_vars, list), "condition_vars must be a list"
+
+    alignment_pars = pars.get("alignment", {})
+    align_proj_vars = pars.get("align_proj", {}).get("condition_vars", condition_vars)
+
+    # -------- Get exclude indices ----------
+    exclude_units = alignment_pars.get("exclude_units", None)
+
+    if exclude_units is None:
+        raise ValueError(
+            "Set pars['alignment']['exclude_units'] (list of masks or indices)."
+        )
+
+    if len(exclude_units) != len(data):
+        raise ValueError(
+            "exclude_units must have one entry per session."
+        )
+
+    num_sessions = len(data)
+
+    # -------- Subselect neurons ----------
+    data_work = []
+    kept_unit_idx = []
+
+    for i in range(num_sessions):
+
+        resp = data[i]["response"]  # (n_units, n_time, n_trials)
+        n_units = resp.shape[0]
+
+        excl = np.asarray(exclude_units[i])
+
+        if np.any(excl < 0) or np.any(excl >= n_units):
+            raise ValueError(
+                f"Session {i}: invalid exclude indices."
+            )
+
+        keep_mask = np.ones(n_units, dtype=bool)
+        keep_mask[excl] = False
+        unit_idx = np.where(keep_mask)[0]
+
+        if unit_idx.size == 0:
+            raise ValueError(f"Session {i}: all neurons excluded.")
+
+        kept_unit_idx.append(unit_idx)
+
+        dcopy = dict(data[i])
+        dcopy["response"] = resp[unit_idx, :, :]
+        data_work.append(dcopy)
+
+    # -------------------------------------------------
+    D_align = [None] * num_sessions
+    have_any_axis = False
+
+    # ---------- 1) Compute per-session condition means ----------
+    session_cond_means = []
+
+    for i_session in range(num_sessions):
+
+        D_cond = sort_trials_by_condition(
+            data_work[i_session], condition_vars
+        )
+
+        if len(D_cond) == 0:
+            raise ValueError(f"Session {i_session} has no conditions.")
+
+        means_this_session = np.stack(
+            [np.mean(cdict["response"], axis=2) for cdict in D_cond],
+            axis=2
+        )
+
+        session_cond_means.append(means_this_session)
+
+    # ---------- consistency ----------
+    n_conditions = session_cond_means[0].shape[2]
+    n_time0 = session_cond_means[0].shape[1]
+    for i, ms in enumerate(session_cond_means):
+        #print(n_conditions, ms.shape)
+        if ms.shape[1] != n_time0 or ms.shape[2] != n_conditions:
+         raise ValueError("Inconsistent session shapes.")
+
+    # ---------- choose contrast ----------
+    if "cond_contrast" in alignment_pars:
+        a_idx, b_idx = alignment_pars["cond_contrast"]
+    else:
+        if n_conditions >= 2:
+            a_idx, b_idx = (0, 1)
+        else:
+            raise ValueError("Need >=2 conditions.")
+
+    # ---------- 2) Align each session ----------
+    for i_session in range(num_sessions):
+
+        sess_means = session_cond_means[i_session]
+        resp = data_work[i_session]["response"]
+
+        n_units, n_time, n_trials = resp.shape
+
+        local_diff = (
+            sess_means[:, t1:t2, a_idx]
+            - sess_means[:, t1:t2, b_idx]
+        )
+
+        local_ref = np.mean(local_diff, axis=1)
+
+        norm_ref = np.linalg.norm(local_ref)
+
+        if norm_ref > 0:
+            U = local_ref / norm_ref
+            have_any_axis = True
+
+            if np.dot(U, local_ref) < 0:
+                U = -U
+        else:
+            U = np.zeros(n_units)
+
+        U = U[:, None]
+
+        # Project trials
+        resp_2d = resp.reshape(n_units, -1)
+        aligned_2d = U.T @ resp_2d
+        aligned = aligned_2d.reshape(1, n_time, n_trials)
+
+        # Bias
+        projA = float(np.mean(U.T @ sess_means[:, t1:t2, a_idx]))
+        projB = float(np.mean(U.T @ sess_means[:, t1:t2, b_idx]))
+
+        if np.isfinite(projA) and np.isfinite(projB):
+            bias = -0.5 * (projA + projB)
+        else:
+            bias = 0.0
+
+        aligned += bias
+
+        # Package
+        D_align[i_session] = dict(data_work[i_session])
+
+        D_align[i_session]["response"] = aligned
+        D_align[i_session]["U"] = U
+        D_align[i_session]["bias"] = float(bias)
+        D_align[i_session]["X_mu"] = np.zeros(n_units)
+
+        # NEW
+        D_align[i_session]["unit_idx"] = kept_unit_idx[i_session]
+
+    # ---------- 3) Trial-averaged aligned data ----------
+    D_cond_avg_proj_list = []
+
+    for i_session in range(num_sessions):
+
+        D_cond_align = sort_trials_by_condition(
+            D_align[i_session], align_proj_vars
+        )
+
+        means = np.stack(
+            [np.mean(cdict["response"], axis=2) for cdict in D_cond_align],
+            axis=2
+        )
+
+        D_cond_avg_proj_list.append(means)
+
+    D_cond_avg_proj_align = np.stack(
+        D_cond_avg_proj_list, axis=3
+    )
+
+    align_stats = {
+        "cond_axis_present": bool(have_any_axis),
+        "cond_contrast": (a_idx, b_idx),
+        "time_weighting": "uniform",
+        "n_units_by_session": [len(ix) for ix in kept_unit_idx],
+    }
+
+    return D_align, D_cond_avg_proj_align, align_stats
