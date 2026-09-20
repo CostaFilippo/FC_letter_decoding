@@ -1,0 +1,5 @@
+
+# R session artefacts
+.RData
+.Rhistory
+.Rproj.user/
